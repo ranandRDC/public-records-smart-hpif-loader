@@ -1,0 +1,12 @@
+NotificationTopicArn: arn:aws:sns:us-west-2:051050538330:TaxTopic # to be given by collections team
+# SlackIntegrationEmailGeneral: prec-sdl-mls-gen-aler-aaaal57teuuhgrpg2w7pfw2ava@newscorp.org.slack.com
+# SlackIntegrationEmailPriority: prec-sdl-mls-priority-aaaal572njfbf6xuglze7vmufq@newscorp.org.slack.com
+# s3RoleName: ""
+env: qa
+# url: https://splunk-hf2.moveaws.com:8088/services/collector/event
+# token: 81FC8268-05E1-4A9E-9CB2-3FB8D9Z854E3
+# sourcetype: prec_sdl_mls_qa
+# index: prec_sdl
+# disable: "false"
+# debug: "true"
+# s3Bucket: public-records-smart-hpif-loader-staging-qa

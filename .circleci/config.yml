@@ -1,0 +1,191 @@
+version: 2.1
+
+orbs:
+  move-content-platform: moverdc/move-content-platform@0.1.7
+  move-ci: moverdc/move-ci@0.72.0
+
+definitions:
+  deployment-params: &deployment-params
+    # The name of this application, this should be the only thing that needs to be changed between projects.
+    app-name: public-record-smart-hpif-loader
+    context: [aws, github]
+
+parameters:
+  run_manual:
+    type: boolean
+    default: false 
+
+workflow-anchors:
+  dev-only: &dev-only
+    filters:
+      branches:
+        only: /^feature\/.*/
+
+  qa-only: &qa-only
+    filters:
+      branches:
+        only: [qa]
+
+  master-only: &master-only
+    filters:
+      branches:
+        only: [main]
+
+jobs:
+  run-test-cases:
+    machine:
+      image: ubuntu-2204:2023.04.2
+    steps:
+      - move-ci/aws-tunnel-up
+      - checkout
+      - run:
+          name: Running shell file with -t flag to run test cases
+          command: |
+            ./run.sh -t
+
+  run-shell-file-dev:
+    machine:
+      image: ubuntu-2204:2023.04.2
+    steps:
+      - move-ci/aws-tunnel-up
+      - move-ci/aws-auth-domain-role:
+          account: $AWS_ACCOUNT_SDSWRITE_DEV
+          role-name: cicd-circleci-domain-smart-hpif-s3-role-dev
+      - checkout
+      - run:
+          name: Running shell file with -b flag and uploading files to S3
+          command: |
+            ./run.sh -b
+
+  run-shell-file-qa:
+    machine:
+      image: ubuntu-2204:2023.04.2
+    steps:
+      - move-ci/aws-tunnel-up
+      - move-ci/aws-auth-domain-role:
+          account: $AWS_ACCOUNT_SDSWRITE_QA
+          role-name: cicd-circleci-domain-smart-mls-loader-s3-role-qa
+      - checkout
+      - run:
+          name: Running shell file with -b flag and uploading files to S3
+          command: |
+            ./run.sh -b
+
+  run-shell-file-qa-pr:
+    machine:
+      image: ubuntu-2204:2023.04.2
+    steps:
+      - move-ci/aws-tunnel-up
+      - move-ci/aws-auth-domain-role:
+          account: $AWS_ACCOUNT_SDSWRITE_QA
+          role-name: cicd-circleci-domain-smart-mls-loader-s3-role-qa-pr-${CIRCLE_PULL_REQUEST##*/}
+      - checkout
+      - run:
+          name: Running shell file with -b flag and uploading files to S3
+          command: |
+            ./run.sh -b
+
+  run-shell-file-prod:
+    machine:
+      image: ubuntu-2204:2023.04.2
+    steps:
+      - move-ci/aws-tunnel-up
+      - move-ci/aws-auth-domain-role:
+          account: $AWS_ACCOUNT_SDSWRITE_PROD
+          role-name: cicd-circleci-domain-smart-mls-loader-s3-role-prod
+      - checkout
+      - run:
+          name: Running shell file with -b flag and uploading files to S3
+          command: |
+            ./run.sh -b
+
+workflows:
+  setup_and_deploy:
+    jobs:
+      - move-content-platform/deploy-serverless-from-workspace:
+          name: serverless-deploy-qa
+          account: $AWS_ACCOUNT_SDSWRITE_QA
+          stage: qa
+          vars-file: vars.qa.yaml
+          account-vars: aws-sdswrite-qa-us-west-2.yml
+          <<: *deployment-params
+          <<: *qa-only
+
+      - run-shell-file-qa:
+          context: [aws, artifactory]
+          requires: [serverless-deploy-qa]
+          <<: *qa-only
+
+      - run-test-cases:
+          context: [aws, artifactory]
+          <<: *qa-only
+
+      - confirm-production-deployment:
+          type: approval
+          requires: [serverless-deploy-qa]
+          <<: *master-only
+
+      - move-content-platform/deploy-serverless-from-workspace:
+          name: serverless-deploy-prod
+          account: $AWS_ACCOUNT_SDSWRITE_PROD
+          stage: prod
+          vars-file: vars.prod.yaml
+          account-vars: aws-sdswrite-prod-us-west-2.yml
+          <<: *deployment-params
+          <<: *master-only
+
+      - run-shell-file-prod:
+          context: [aws, artifactory]
+          requires: [serverless-deploy-prod]
+          <<: *master-only 
+      
+      - run-test-cases:
+          context: [aws, artifactory]
+          <<: *master-only
+
+  setup_and_deploy_qa_pr:
+    when:
+      and:
+        - matches:
+            pattern: /^feature\/.*/
+            value: << pipeline.git.branch >>
+        - equal: [ true, << pipeline.parameters.run_manual >>]
+    jobs:
+      - move-content-platform/deploy-serverless-from-workspace:
+          name: serverless-deploy-qa-pr
+          account: $AWS_ACCOUNT_SDSWRITE_QA
+          stage: qa-pr-${CIRCLE_PULL_REQUEST##*/}
+          lifetime: "+1 day"
+          vars-file: vars.qa-pr.yaml
+          account-vars: aws-sdswrite-qa-us-west-2.yml
+          <<: *deployment-params
+
+      - run-shell-file-qa-pr:
+          context: [aws, artifactory]
+          requires: [serverless-deploy-qa-pr]
+
+      - run-test-cases:
+          context: [aws, artifactory]
+
+  setup_and_deploy_dev:
+    when:
+      and:
+        - matches:
+            pattern: /^feature\/.*/
+            value: << pipeline.git.branch >>
+        - equal: [ false , << pipeline.parameters.run_manual >>]
+    jobs:
+      - move-content-platform/deploy-serverless-from-workspace:
+          name: serverless-deploy-dev
+          account: $AWS_ACCOUNT_SDSWRITE_DEV
+          stage: dev
+          vars-file: vars.dev.yaml
+          account-vars: aws-sdswrite-dev-us-west-2.yml
+          <<: *deployment-params
+
+      - run-shell-file-dev:
+          context: [aws, artifactory]
+          requires: [serverless-deploy-dev]
+         
+      - run-test-cases:
+          context: [aws, artifactory]

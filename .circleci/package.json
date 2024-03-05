@@ -1,0 +1,13 @@
+{
+    "name": "serverless-deploy",
+    "version": "1.0.0",
+    "license": "none",
+    "private": true,
+    "dependencies": {
+      "serverless": "^3.29.0",
+      "serverless-plugin-log-retention": "^2.0.0",
+      "serverless-prune-plugin": "^2.0.2",
+      "serverless-tag-cloud-watch-logs": "^1.0.0",
+      "serverless-step-functions": "^3.13.1"
+    }
+  }

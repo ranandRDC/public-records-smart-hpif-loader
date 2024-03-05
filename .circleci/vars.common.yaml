@@ -1,0 +1,11 @@
+accountId: "{{ accountId }}"
+accountRegion: "{{ accountRegion }}"
+
+memorySize: 128
+
+tagOwner: dl-sdswritedev@move.com
+tagComponent: "{{ appName }}"
+tagProduct: tce
+
+
+runtime: python3.8

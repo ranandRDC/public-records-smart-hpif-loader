@@ -1,0 +1,482 @@
+---
+service: ${self:custom.config.appName}
+
+custom:
+  deployStage: ${opt:stage}
+  config: ${file(${env:VARS_FILE})}
+  logRetentionInDays: 3
+  prune:
+    automatic: true
+    number: 3
+
+plugins:
+  - serverless-plugin-log-retention
+  - serverless-tag-cloud-watch-logs
+  - serverless-prune-plugin
+  - serverless-step-functions
+
+provider:
+  name: aws
+  runtime: ${self:custom.config.runtime}
+  region: ${self:custom.config.accountRegion}
+  stage: ${self:custom.deployStage}
+  memorySize: ${self:custom.config.memorySize}
+  timeout: 30
+  deploymentBucket:
+    name: move-${self:custom.config.accountId}-lambda
+  stackTags:
+    owner: ${self:custom.config.tagOwner}
+    component: ${self:custom.config.tagComponent}
+    product: ${self:custom.config.tagProduct}
+    pipeline-delete-stack-after: "${self:custom.config.deleteStackAfter, 'undefined'}"
+  role: ExecutionRole
+
+package:
+  exclude:
+    - ./**
+  include:
+    - ./lib/**
+    - ./src/**
+
+functions:
+  invokeLambda:
+    name: hpifInvokeLambda-${sls:stage}
+    handler: src/job_invoke_lambda/main.handler
+    events:
+      - sns: ${self:custom.config.NotificationTopicArn}
+    role: !GetAtt ExecutionRole.Arn #required
+    environment:
+      ENV: ${self:custom.config.env}
+      # SFN: !Ref StateMachine
+
+  # SplunkLogForwarder:
+  #   name: mlsSplunkLogForwarder-${sls:stage}
+  #   events:
+  #     - cloudwatchLog: 'prec-smart-data-loader-mls-log-group-${sls:stage}'
+  #     - cloudwatchLog: '/aws/lambda/mlsInvokeLambda-${sls:stage}'
+  #   handler: src/splunklog-forwarder.handler
+  #   role: !GetAtt SplunkExecutionRole.Arn
+  #   memorySize: 128
+  #   runtime: nodejs16.x
+  #   timeout: 300
+  #   environment:
+  #     SPLUNK_HEC_URL: ${self:custom.config.url}
+  #     SPLUNK_HEC_TOKEN: ${self:custom.config.token}
+  #     SPLUNK_INDEX: ${self:custom.config.index}
+  #     SPLUNK_SOURCETYPE: ${self:custom.config.sourcetype}
+  #     DISABLED: ${self:custom.config.disable}
+  #     DEBUG: ${self:custom.config.debug}
+ 
+resources:
+  Resources:
+    # Lambda Role
+    ExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaENIManagementAccess"
+        PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/CloudServices-Boundary"
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: lambda-access-policy
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - cloudwatch:*
+                    - s3:*
+                    - dynamodb:*
+                    - sns:Publish
+                    - states:StartExecution
+                  Resource: "*"
+
+    # # Step Functions (SFN) resources
+    # StateMachine:
+    #   Type: AWS::StepFunctions::StateMachine
+    #   Properties:
+    #     StateMachineName: ${self:custom.config.stackName}-state-machine
+    #     DefinitionSubstitutions:
+    #       NotificationTopic: !Ref SlackNotificationTopic
+    #       ErrorNotificationTopic: !Ref SlackNotificationTopicForErrors
+    #       TransformJob: !Ref GlueJob
+    #       WriteToSinkJob: !Ref GlueJob
+    #       write_history_to_s3: !Ref GlueJob
+    #     DefinitionString: |-
+    #       {
+    #         "Comment": "Smart Loader state machine for MLS",
+    #         "StartAt": "JobStartNotification",
+    #         "States": {
+    #           "JobStartNotification": {
+    #             "Type": "Task",
+    #             "Resource": "arn:aws:states:::sns:publish",
+    #             "Parameters": {
+    #               "Message": "Starting job for MLS",
+    #               "TopicArn": "${NotificationTopic}"
+    #             },
+    #             "ResultPath": null,
+    #             "Next": "ChoiceFeedType"
+    #           },
+    #           "ChoiceFeedType": {
+    #             "Type": "Choice",
+    #             "Choices": [
+    #               {
+    #                 "Variable": "$.feed_type",
+    #                 "StringEquals": "mls_history",
+    #                 "Next": "write_history_to_s3"
+    #               }
+    #             ],
+    #             "Default": "Transform"
+    #           },
+    #           "write_history_to_s3": {
+    #             "Type": "Task",
+    #             "ResultPath": "$.writetaskresult",
+    #             "Resource": "arn:aws:states:::glue:startJobRun.sync",
+    #             "Parameters": {
+    #               "JobName": "${write_history_to_s3}",
+    #               "Arguments": {
+    #                 "--JOB_NAME": "${write_history_to_s3}",
+    #                 "--ENV.$": "$.env",
+    #                 "--FEED_TYPE.$": "$.feed_type",
+    #                 "--FEED_STAGE": "write_history_to_s3",
+    #                 "--GLOBAL_TRACKING_ID.$": "$.global_tracking_id",
+    #                 "--S3_FILE_PATH.$": "$.files.s3_mls_file",
+    #                 "--PREVS_JOB_ID": "null",
+    #                 "--DATE_PATH.$": "$.date_path"
+    #               }
+    #             },
+    #             "TimeoutSeconds": 72000,
+    #             "Next": "JobEndNotification",
+    #             "Retry": [
+    #               {
+    #                 "ErrorEquals": [
+    #                   "States.Timeout"
+    #                 ],
+    #                 "IntervalSeconds": 1,
+    #                 "BackoffRate": 2,
+    #                 "MaxAttempts": 3
+    #               }
+    #             ],
+    #             "Catch": [
+    #               {
+    #                 "ErrorEquals": [
+    #                   "States.TaskFailed"
+    #                 ],
+    #                 "Next": "JobFailedNotification",
+    #                 "ResultPath": "$.error"
+    #               }
+    #             ]
+    #           },
+    #           "Transform": {
+    #             "Type": "Task",
+    #             "ResultPath": "$.taskresult",
+    #             "Resource": "arn:aws:states:::glue:startJobRun.sync",
+    #             "Parameters": {
+    #               "JobName": "${TransformJob}",
+    #               "Arguments": {
+    #                 "--JOB_NAME": "${TransformJob}",
+    #                 "--ENV.$": "$.env",
+    #                 "--FEED_TYPE.$": "$.feed_type",
+    #                 "--FEED_STAGE": "transform",
+    #                 "--GLOBAL_TRACKING_ID.$": "$.global_tracking_id",
+    #                 "--S3_FILE_PATH.$": "$.files.s3_mls_file",
+    #                 "--PREVS_JOB_ID": "null",
+    #                 "--DATE_PATH.$": "$.date_path"
+    #               }
+    #             },
+    #             "Next": "TransformNotification",
+    #             "TimeoutSeconds": 7200,
+    #             "Retry": [
+    #               {
+    #                 "ErrorEquals": [
+    #                   "States.Timeout"
+    #                 ],
+    #                 "IntervalSeconds": 1,
+    #                 "BackoffRate": 2,
+    #                 "MaxAttempts": 3
+    #               }
+    #             ],
+    #             "Catch": [
+    #               {
+    #                 "ErrorEquals": [
+    #                   "States.TaskFailed"
+    #                 ],
+    #                 "Next": "JobFailedNotification",
+    #                 "ResultPath": "$.error"
+    #               }
+    #             ]
+    #           },
+    #           "TransformNotification": {
+    #             "Type": "Task",
+    #             "ResultPath": null,
+    #             "Resource": "arn:aws:states:::sns:publish",
+    #             "Parameters": {
+    #               "Message": "Transform stage completed, starting write to sink for mls file",
+    #               "TopicArn": "${NotificationTopic}"
+    #             },
+    #             "Next": "WriteToSink"
+    #           },
+    #           "WriteToSink": {
+    #             "Type": "Task",
+    #             "ResultPath": "$.writetaskresult",
+    #             "Resource": "arn:aws:states:::glue:startJobRun.sync",
+    #             "Parameters": {
+    #               "JobName": "${WriteToSinkJob}",
+    #               "Arguments": {
+    #                 "--JOB_NAME": "${WriteToSinkJob}",
+    #                 "--ENV.$": "$.env",
+    #                 "--FEED_TYPE.$": "$.feed_type",
+    #                 "--FEED_STAGE": "write_to_sink",
+    #                 "--GLOBAL_TRACKING_ID.$": "$.global_tracking_id",
+    #                 "--S3_FILE_PATH.$": "$.files.s3_mls_file",
+    #                 "--PREVS_JOB_ID.$": "$.taskresult.Id",
+    #                 "--DATE_PATH.$": "$.date_path"
+    #               }
+    #             },
+    #             "TimeoutSeconds": 72000,
+    #             "Next": "JobEndNotification",
+    #             "Retry": [
+    #               {
+    #                 "ErrorEquals": [
+    #                   "States.Timeout"
+    #                 ],
+    #                 "IntervalSeconds": 1,
+    #                 "BackoffRate": 2,
+    #                 "MaxAttempts": 3
+    #               }
+    #             ],
+    #             "Catch": [
+    #               {
+    #                 "ErrorEquals": [
+    #                   "States.TaskFailed"
+    #                 ],
+    #                 "Next": "JobFailedNotification",
+    #                 "ResultPath": "$.error"
+    #               }
+    #             ]
+    #           },
+    #           "JobEndNotification": {
+    #             "Type": "Task",
+    #             "Resource": "arn:aws:states:::sns:publish",
+    #             "Parameters": {
+    #               "Message": "mls smart loader job completed",
+    #               "TopicArn": "${NotificationTopic}"
+    #             },
+    #             "End": true
+    #           },
+    #           "JobFailedNotification": {
+    #             "Type": "Task",
+    #             "ResultPath": null,
+    #             "Resource": "arn:aws:states:::sns:publish",
+    #             "Parameters": {
+    #               "Message": "Job failed while processing mls ",
+    #               "TopicArn": "${ErrorNotificationTopic}"
+    #             },
+    #             "End": true
+    #           }
+    #         }
+    #       }
+    #     RoleArn: !GetAtt StepFunctionRole.Arn
+    
+    # StepFunctionRole:
+    #   Type: AWS::IAM::Role
+    #   Properties:
+    #     AssumeRolePolicyDocument: #required
+    #       Statement:
+    #         - Effect: Allow
+    #           Principal:
+    #             Service:
+    #               - states.amazonaws.com
+    #               - logs.amazonaws.com
+    #               - glue.amazonaws.com
+    #               - sns.amazonaws.com
+    #           Action:
+    #             - sts:AssumeRole
+    #     Description: IAM role to execute step functions
+    #     PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/CloudServices-Boundary"
+    #     Policies:
+    #       - PolicyName: mls-step-function-policy
+    #         PolicyDocument:
+    #           Version: "2012-10-17"
+    #           Statement:
+    #             - Effect: Allow
+    #               Action:
+    #                 - glue:StartJobRun
+    #                 - glue:GetJobRun
+    #                 - glue:GetJobRuns
+    #                 - glue:BatchStopJobRun
+    #                 - dynamodb:DescribeTable
+    #                 - dynamodb:GetItem
+    #                 - dynamodb:PutItem
+    #                 - dynamodb:UpdateItem
+    #                 - dynamodb:DeleteItem
+    #               Resource: "*"
+    #             - Effect: Allow
+    #               Action:
+    #                 - sns:Publish
+    #               Resource:
+    #                 - !Ref SlackNotificationTopic 
+    #                 - !Ref SlackNotificationTopicForErrors
+
+
+
+    # # Notification Resources
+    # SlackNotificationTopic:
+    #   Type: AWS::SNS::Topic
+    #   Properties:
+    #     TopicName: ${self:custom.config.stackName}-slack
+
+    # SlackNotificationTopicSubscription:
+    #   Type: AWS::SNS::Subscription
+    #   Properties:
+    #     Endpoint: ${self:custom.config.SlackIntegrationEmailGeneral}
+    #     Protocol: email
+    #     TopicArn: !Ref SlackNotificationTopic
+
+    # SlackNotificationTopicForErrors:
+    #   Type: AWS::SNS::Topic
+    #   Properties:
+    #     TopicName: ${self:custom.config.stackName}-slack-error
+
+    # SlackNotificationTopicForErrorsSubscription:
+    #   Type: AWS::SNS::Subscription
+    #   Properties:
+    #     Endpoint: ${self:custom.config.SlackIntegrationEmailPriority}
+    #     Protocol: email
+    #     TopicArn: !Ref SlackNotificationTopicForErrors
+
+
+
+    # # Glue resources
+    # GlueJobRole:
+    #   Type: AWS::IAM::Role
+    #   Properties:
+    #     AssumeRolePolicyDocument: #required
+    #       Statement:
+    #         - Effect: Allow
+    #           Principal:
+    #             Service:
+    #               - states.amazonaws.com
+    #               - logs.amazonaws.com
+    #               - glue.amazonaws.com
+    #           Action:
+    #             - sts:AssumeRole
+    #     Description: IAM role to execute step functions
+    #     Path: /
+    #     PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/CloudServices-Boundary"
+    #     ManagedPolicyArns:
+    #       - arn:aws:iam::aws:policy/AmazonS3FullAccess
+    #       - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+    #       - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+    #       - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+    # GlueJob:
+    #   Type: AWS::Glue::Job
+    #   Properties:
+    #     Command: 
+    #       Name: glueetl
+    #       PythonVersion: "3"
+    #       ScriptLocation: s3://public-records-smart-mls-loader-staging-${self:custom.config.env}/glue-scripts-${sls:stage}/glue_main.py
+    #     DefaultArguments:
+    #       "--enable-metrics": ""
+    #       "--enable-continuous-cloudwatch-log": "true"
+    #       "--extra-py-files": "s3://public-records-smart-mls-loader-staging-${self:custom.config.env}/glue-scripts-${sls:stage}/prec_smart_data_loader_lib_glue_0.1.0.zip"
+    #     Description: Mls loader Glue job 
+    #     ExecutionProperty:
+    #       MaxConcurrentRuns: 5
+    #     Name: ${self:custom.config.stackName}-glue-job
+    #     Role: !GetAtt GlueJobRole.Arn #required
+    #     Timeout: 600
+    #     NumberOfWorkers: 100
+    #     WorkerType: "G.2X"
+    #     GlueVersion: "3.0"
+
+    # S3UploadRole:
+    #   Type: AWS::IAM::Role
+    #   Properties:
+    #     RoleName: cicd-circleci-domain-smart-mls-loader-s3-role-${sls:stage}
+    #     AssumeRolePolicyDocument:
+    #       Version: '2012-10-17'
+    #       Statement:
+    #         - Effect: Allow
+    #           Principal:
+    #             AWS: "arn:aws:iam::799269618777:role/cicd-circleci-domain-chain-role"
+    #             Service: [s3.amazonaws.com]
+    #           Action: ['sts:AssumeRole']
+    #     Description: IAM role to upload to S3
+    #     PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/CloudServices-Boundary"
+    #     ManagedPolicyArns:
+    #       - arn:aws:iam::aws:policy/AmazonS3FullAccess
+    #     Policies:
+    #       - PolicyName: s3-upload-policy
+    #         PolicyDocument:
+    #           Version: '2012-10-17'
+    #           Statement:
+    #             - Effect: Allow
+    #               Action: 
+    #                 - 's3:PutObject'
+    #                 - 's3:PutObjectAcl'
+    #               Resource: 'arn:aws:s3:::public-records-smart-mls-loader-staging-${sls:stage}'
+
+
+    #   ######### Splunk resources #########
+    # CommonLogGroup:
+    #   Type: AWS::Logs::LogGroup
+    #   Properties:
+    #     LogGroupName: 'prec-smart-data-loader-mls-log-group-${sls:stage}'
+
+    # SplunkExecutionRole:
+    #   Type: 'AWS::IAM::Role'
+    #   Properties:
+    #     Path: /
+    #     PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/CloudServices-Boundary"
+    #     RoleName: !Sub 'prec-smart-data-loader-mls-splunk-forwarder-role-${sls:stage}'
+    #     AssumeRolePolicyDocument:
+    #       Version: '2012-10-17'
+    #       Statement:
+    #         - Action: ['sts:AssumeRole']
+    #           Effect: Allow
+    #           Principal:
+    #             Service: [ec2.amazonaws.com]
+    #         - Effect: Allow
+    #           Principal:
+    #             Service: [lambda.amazonaws.com]
+    #           Action: ['sts:AssumeRole']
+    #     Policies:
+    #       - PolicyName: general-service
+    #         PolicyDocument:
+    #           Version: '2012-10-17'
+    #           Statement:
+    #             - Effect: Allow
+    #               Action:
+    #                 - 'logs:CreateLogGroup'
+    #                 - 'logs:CreateLogStream'
+    #                 - 'logs:DescribeLogGroups'
+    #                 - 'logs:DescribeLogStreams'
+    #                 - 'logs:DescribeMetricFilters'
+    #                 - 'logs:DescribeQueries'
+    #                 - 'logs:PutLogEvents'
+    #                 - 'cloudwatch:EnableAlarmActions'
+    #                 - 'cloudwatch:GetMetricData'
+    #                 - 'cloudwatch:GetMetricStatistics'
+    #                 - 'cloudwatch:PutMetricAlarm'
+    #                 - 'cloudwatch:PutMetricData'
+    #                 - 'cloudwatch:SetAlarmState'
+    #                 - 'ec2:DescribeNetworkInterfaces'
+    #                 - 'ec2:CreateNetworkInterface'
+    #                 - 'ec2:DeleteNetworkInterface'
+    #                 - 'datapipeline:DescribeObjects'
+    #                 - 'datapipeline:EvaluateExpression'
+    #                 - 'iam:GetInstanceProfile'
+    #                 - 'iam:GetRole'
+    #                 - 'iam:GetRolePolicy'
+    #                 - 'iam:ListAttachedRolePolicies'
+    #                 - 'iam:ListRolePolicies'
+    #                 - 'iam:ListInstanceProfiles'
+    #               Resource: '*'
